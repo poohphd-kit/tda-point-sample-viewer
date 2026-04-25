@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TDA 3D Point Cloud Viewer</title>
+
+  <!--
+    OrbitControls internally imports the bare module name "three".
+    This import map tells the browser where "three" and "three/addons/" live.
+    Without this, some browsers/sandboxes throw:
+    Failed to resolve module specifier "three".
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; overflow: hidden; }
+    #app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+    aside { padding: 18px; background: #111827; border-right: 1px solid #374151; overflow-y: auto; }
+    main { position: relative; min-width: 0; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    .sub { color: #9ca3af; font-size: 13px; line-height: 1.5; margin-bottom: 16px; }
+    .group { border: 1px solid #374151; background: #1f2937; border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+    .group h2 { font-size: 14px; margin: 0 0 12px; }
+    label { display: block; font-size: 13px; color: #9ca3af; margin: 10px 0 6px; }
+    input, button { width: 100%; }
+    input[type="number"] { padding: 9px 10px; border-radius: 9px; border: 1px solid #374151; background: #020617; color: #e5e7eb; }
+    input[type="color"] { height: 38px; border: 1px solid #374151; border-radius: 9px; background: #020617; padding: 4px; }
+    input[type="range"] { accent-color: #38bdf8; }
+    button { cursor: pointer; border: 1px solid #0284c7; background: linear-gradient(180deg, #0ea5e9, #0369a1); color: white; padding: 10px 12px; border-radius: 10px; font-weight: 700; margin-top: 10px; }
+    button.secondary { border-color: #374151; background: #020617; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .check { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 14px; }
+    .check input { width: auto; }
+    .value { font-size: 12px; color: #9ca3af; text-align: right; }
+    #viewer { position: absolute; inset: 0; }
+    #message { position: absolute; left: 16px; bottom: 16px; max-width: min(560px, calc(100% - 32px)); background: rgba(2,6,23,.82); border: 1px solid #374151; border-radius: 12px; padding: 10px 12px; font-size: 13px; white-space: pre-wrap; }
+    .stats { font-size: 12px; color: #9ca3af; line-height: 1.65; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    @media (max-width: 860px) { body { overflow: auto; } #app { grid-template-columns: 1fr; grid-template-rows: auto 70vh; height: auto; min-height: 100vh; } main { min-height: 70vh; } aside { border-right: none; border-bottom: 1px solid #374151; } }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside>
+      <h1>TDA 3D Point Cloud Viewer</h1>
+      <div class="sub">Web版です。サンプル点群を生成・保存・描画します。ドラッグで回転、ホイールでズームできます。</div>
+
+      <section class="group">
+        <label for="sampleCount">点の数</label>
+        <input id="sampleCount" type="number" min="1" step="1" value="100" />
+        <button id="generateSample">サンプル生成</button>
+      </section>
+
+      <section class="group">
+        <h2>表示設定</h2>
+        <div class="check"><input id="showPoints" type="checkbox" checked><span>点群を表示</span></div>
+        <div class="check"><input id="showSpheres" type="checkbox" checked><span>球体を表示</span></div>
+
+        <label for="radius">球体半径</label>
+        <input id="radius" type="range" min="0" max="0.5" step="0.005" value="0.08" />
+        <div id="radiusValue" class="value">0.080</div>
+
+        <div class="row">
+          <div>
+            <label for="pointColor">点群色</label>
+            <input id="pointColor" type="color" value="#38bdf8" />
+          </div>
+          <div>
+            <label for="sphereColor">球体色</label>
+            <input id="sphereColor" type="color" value="#22c55e" />
+          </div>
+        </div>
+
+        <label for="opacity">球体透明度</label>
+        <input id="opacity" type="range" min="0" max="1" step="0.01" value="0.32" />
+        <div id="opacityValue" class="value">0.32</div>
+      </section>
+
+      <section class="group">
+        <h2>情報</h2>
+        <div id="stats" class="stats">未生成</div>
+      </section>
+    </aside>
+
+    <main>
+      <div id="viewer"></div>
+      <div id="message">サンプル点数を指定して生成してください。</div>
+    </main>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const viewer = document.getElementById("viewer");
+    const message = document.getElementById("message");
+    const stats = document.getElementById("stats");
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0f172a);
+
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
+    camera.position.set(2.6, 2.1, 2.8);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    viewer.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+    const light = new THREE.DirectionalLight(0xffffff, 1.0);
+    light.position.set(4, 6, 5);
+    scene.add(light);
+
+    const axes = new THREE.AxesHelper(1.25);
+    scene.add(axes);
+
+    let rawPoints = [];
+    let normalizedPoints = [];
+    let pointGroup = new THREE.Group();
+    let sphereGroup = new THREE.Group();
+    scene.add(pointGroup, sphereGroup);
+
+    const els = {
+      sampleCount: document.getElementById("sampleCount"),
+      generateSample: document.getElementById("generateSample"),
+      showPoints: document.getElementById("showPoints"),
+      showSpheres: document.getElementById("showSpheres"),
+      radius: document.getElementById("radius"),
+      radiusValue: document.getElementById("radiusValue"),
+      pointColor: document.getElementById("pointColor"),
+      sphereColor: document.getElementById("sphereColor"),
+      opacity: document.getElementById("opacity"),
+      opacityValue: document.getElementById("opacityValue"),
+    };
+
+    function setMessage(text) { message.textContent = text; }
+
+    function validateCount() {
+      const n = Number(els.sampleCount.value);
+      if (!Number.isInteger(n) || n < 1) throw new Error("点の数には1以上の整数を入力してください。");
+      if (n > 5000) throw new Error("ブラウザ表示のため、点数は5000以下を推奨します。");
+      return n;
+    }
+
+    function generatePoints(n) {
+      return Array.from({ length: n }, () => ({
+        x: Math.random() * 200 - 100,
+        y: Math.random() * 200 - 100,
+        z: Math.random() * 200 - 100
+      }));
+    }
+
+    function normalize(points) {
+      const maxAbs = Math.max(1e-12, ...points.flatMap(p => [Math.abs(p.x), Math.abs(p.y), Math.abs(p.z)]));
+      return points.map(p => ({ x: p.x / maxAbs, y: p.y / maxAbs, z: p.z / maxAbs }));
+    }
+
+    function clearGroup(group) {
+      while (group.children.length) {
+        const child = group.children.pop();
+        child.geometry?.dispose();
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+        else child.material?.dispose();
+      }
+    }
+
+    function renderPointCloud() {
+      clearGroup(pointGroup);
+      clearGroup(sphereGroup);
+
+      const radius = Number(els.radius.value);
+      const pointColor = new THREE.Color(els.pointColor.value);
+      const sphereColor = new THREE.Color(els.sphereColor.value);
+      const opacity = Number(els.opacity.value);
+
+      els.radiusValue.textContent = radius.toFixed(3);
+      els.opacityValue.textContent = opacity.toFixed(2);
+
+      const pointGeom = new THREE.SphereGeometry(0.025, 16, 16);
+      const sphereGeom = new THREE.SphereGeometry(Math.max(radius, 0.0001), 32, 16);
+
+      for (const p of normalizedPoints) {
+        const point = new THREE.Mesh(
+          pointGeom,
+          new THREE.MeshStandardMaterial({ color: pointColor, roughness: 0.45 })
+        );
+        point.position.set(p.x, p.y, p.z);
+        pointGroup.add(point);
+
+        const sphere = new THREE.Mesh(
+          sphereGeom,
+          new THREE.MeshStandardMaterial({ color: sphereColor, transparent: true, opacity, roughness: 0.4, depthWrite: false })
+        );
+        sphere.position.set(p.x, p.y, p.z);
+        sphereGroup.add(sphere);
+      }
+
+      pointGroup.visible = els.showPoints.checked;
+      sphereGroup.visible = els.showSpheres.checked;
+      updateStats();
+    }
+
+    function updateStats() {
+      if (!rawPoints.length) { stats.textContent = "未生成"; return; }
+      const xs = rawPoints.map(p => p.x), ys = rawPoints.map(p => p.y), zs = rawPoints.map(p => p.z);
+      const min = a => Math.min(...a).toFixed(3);
+      const max = a => Math.max(...a).toFixed(3);
+      const maxAbs = Math.max(...rawPoints.flatMap(p => [Math.abs(p.x), Math.abs(p.y), Math.abs(p.z)])).toFixed(3);
+      stats.textContent = `points: ${rawPoints.length}\nx: ${min(xs)} to ${max(xs)}\ny: ${min(ys)} to ${max(ys)}\nz: ${min(zs)} to ${max(zs)}\nmaxAbs: ${maxAbs}`;
+    }
+
+    function resetCamera() {
+      camera.position.set(2.6, 2.1, 2.8);
+      controls.target.set(0, 0, 0);
+      controls.update();
+    }
+
+    function createCsv(points) {
+      return points.map(p => `${p.x.toFixed(6)},${p.y.toFixed(6)},${p.z.toFixed(6)}`).join("\n") + "\n";
+    }
+
+    function downloadBlob(content, filename, type) {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function generateAndDraw({ saveCsv }) {
+      try {
+        const n = validateCount();
+        rawPoints = generatePoints(n);
+        normalizedPoints = normalize(rawPoints);
+        renderPointCloud();
+        resetCamera();
+        setMessage(`${n}点のサンプル点群を生成して描画しました。` + (saveCsv ? "\nCSV保存も開始しました。" : ""));
+        if (saveCsv) downloadBlob(createCsv(rawPoints), `sample_points_${n}.csv`, "text/csv;charset=utf-8");
+      } catch (e) {
+        setMessage(e.message);
+      }
+    }
+
+    function runSelfTests() {
+      console.assert(generatePoints(3).length === 3, "generatePoints should create requested number of points");
+      console.assert(normalize([{ x: 2, y: 0, z: -4 }])[0].z === -1, "normalize should divide by max absolute coordinate");
+      console.assert(createCsv([{ x: 1, y: 2, z: 3 }]).trim() === "1.000000,2.000000,3.000000", "createCsv should output comma-separated x,y,z rows");
+      console.assert(!document.getElementById("csvFile"), "CSV loading UI should not exist in this Web version");
+    }
+
+    els.generateSample.addEventListener("click", () => generateAndDraw({ saveCsv: true }));
+
+    [els.showPoints, els.showSpheres].forEach(el => el.addEventListener("change", () => {
+      pointGroup.visible = els.showPoints.checked;
+      sphereGroup.visible = els.showSpheres.checked;
+    }));
+    [els.radius, els.pointColor, els.sphereColor, els.opacity].forEach(el => el.addEventListener("input", renderPointCloud));
+
+    function resize() {
+      const w = viewer.clientWidth;
+      const h = viewer.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    runSelfTests();
+    animate();
+    generateAndDraw({ saveCsv: false });
+  </script>
+</body>
+</html>

@@ -113,19 +113,6 @@
       inset: 0;
       background: #ffffff;
     }
-    #message {
-      position: absolute;
-      left: 12px;
-      bottom: 12px;
-      max-width: min(520px, calc(100% - 24px));
-      background: rgba(255, 255, 255, .88);
-      border: 1px solid #d1d5db;
-      border-radius: 10px;
-      padding: 8px 10px;
-      font-size: 12px;
-      color: #374151;
-      white-space: pre-wrap;
-    }
     @media (max-width: 760px) {
       html, body { overflow: auto; }
       #app {
@@ -143,7 +130,7 @@
   <div id="app">
     <aside>
       <h1>TDA 3D Point Cloud Viewer</h1>
-      <div class="sub">点群を生成して表示します。ドラッグで回転、ホイールでズーム。</div>
+      <div class="sub">点群を生成して表示します。半径が大きくなると近い点を線で結び、閉路候補を赤で強調します。</div>
 
       <div class="panel">
         <label for="sampleCount">点の数</label>
@@ -151,8 +138,8 @@
         <button id="generateSample">サンプル生成</button>
 
         <label for="radius">球体半径</label>
-        <input id="radius" type="range" min="0" max="0.5" step="0.005" value="0.08" />
-        <div id="radiusValue" class="value">0.080</div>
+        <input id="radius" type="range" min="0" max="0.5" step="0.005" value="0.18" />
+        <div id="radiusValue" class="value">0.180</div>
 
         <div class="row">
           <div>
@@ -173,7 +160,6 @@
 
     <main>
       <div id="viewer"></div>
-      <div id="message">サンプル点数を指定して生成してください。</div>
     </main>
   </div>
 
@@ -182,7 +168,6 @@
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
     const viewer = document.getElementById("viewer");
-    const message = document.getElementById("message");
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xffffff);
@@ -203,13 +188,58 @@
     const light = new THREE.DirectionalLight(0xffffff, 1.0);
     light.position.set(4, 6, 5);
     scene.add(light);
-    scene.add(new THREE.AxesHelper(1.25));
+    // Custom thick axes
+function createThickAxes(length = 1.5, radius = 0.02) {
+  const axesGroup = new THREE.Group();
+
+  const createAxis = (dir, color) => {
+    const material = new THREE.MeshBasicMaterial({ color });
+
+    const cyl = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius, radius, length, 16),
+      material
+    );
+
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(radius * 2, 0.15, 16),
+      material
+    );
+
+    if (dir === 'x') {
+      cyl.rotation.z = -Math.PI / 2;
+      cyl.position.x = length / 2;
+      cone.rotation.z = -Math.PI / 2;
+      cone.position.x = length;
+    } else if (dir === 'y') {
+      cyl.position.y = length / 2;
+      cone.position.y = length;
+    } else if (dir === 'z') {
+      cyl.rotation.x = Math.PI / 2;
+      cyl.position.z = length / 2;
+      cone.rotation.x = Math.PI / 2;
+      cone.position.z = length;
+    }
+
+    axesGroup.add(cyl);
+    axesGroup.add(cone);
+  };
+
+  createAxis('x', 0xff0000);
+  createAxis('y', 0x00aa00);
+  createAxis('z', 0x0000ff);
+
+  return axesGroup;
+}
+
+scene.add(createThickAxes());
 
     let rawPoints = [];
     let normalizedPoints = [];
     const pointGroup = new THREE.Group();
     const sphereGroup = new THREE.Group();
-    scene.add(pointGroup, sphereGroup);
+    const edgeGroup = new THREE.Group();
+    const cycleGroup = new THREE.Group();
+    scene.add(edgeGroup, cycleGroup, sphereGroup, pointGroup);
 
     const els = {
       sampleCount: document.getElementById("sampleCount"),
@@ -221,8 +251,6 @@
       opacity: document.getElementById("opacity"),
       opacityValue: document.getElementById("opacityValue")
     };
-
-    function setMessage(text) { message.textContent = text; }
 
     function validateCount() {
       const n = Number(els.sampleCount.value);
@@ -244,6 +272,13 @@
       return points.map(p => ({ x: p.x / maxAbs, y: p.y / maxAbs, z: p.z / maxAbs }));
     }
 
+    function distance(a, b) {
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const dz = a.z - b.z;
+      return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
     function clearGroup(group) {
       while (group.children.length) {
         const child = group.children.pop();
@@ -253,9 +288,130 @@
       }
     }
 
+    function createLineBetween(a, b, color, opacity = 1) {
+      const points = [new THREE.Vector3(a.x, a.y, a.z), new THREE.Vector3(b.x, b.y, b.z)];
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity });
+      return new THREE.Line(geometry, material);
+    }
+
+    function createTubeBetween(a, b, color, radius = 0.012) {
+      const start = new THREE.Vector3(a.x, a.y, a.z);
+      const end = new THREE.Vector3(b.x, b.y, b.z);
+      const direction = new THREE.Vector3().subVectors(end, start);
+      const length = direction.length();
+      if (length === 0) return new THREE.Group();
+
+      const geometry = new THREE.CylinderGeometry(radius, radius, length, 16);
+      const material = new THREE.MeshBasicMaterial({ color, depthTest: false });
+      const cylinder = new THREE.Mesh(geometry, material);
+
+      const midpoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
+      cylinder.position.copy(midpoint);
+      cylinder.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.clone().normalize());
+      return cylinder;
+    }
+
+    function buildEdges(radius) {
+      const threshold = 2 * radius;
+      const edges = [];
+      const adjacency = Array.from({ length: normalizedPoints.length }, () => []);
+
+      for (let i = 0; i < normalizedPoints.length; i++) {
+        for (let j = i + 1; j < normalizedPoints.length; j++) {
+          if (distance(normalizedPoints[i], normalizedPoints[j]) <= threshold) {
+            edges.push([i, j]);
+            adjacency[i].push(j);
+            adjacency[j].push(i);
+          }
+        }
+      }
+      return { edges, adjacency };
+    }
+
+    function findCycle(edges, adjacency) {
+      let fallback = [];
+
+      for (const [u, v] of edges) {
+        const path = shortestPathExcludingEdge(u, v, u, v, adjacency);
+        if (path.length >= 4) return path;
+        if (!fallback.length && path.length >= 3) fallback = path;
+      }
+
+      return fallback;
+    }
+
+    function shortestPathExcludingEdge(start, goal, exA, exB, adjacency) {
+      const queue = [start];
+      const visited = new Set([start]);
+      const parent = new Map();
+
+      while (queue.length) {
+        const u = queue.shift();
+        if (u === goal) {
+          const path = [];
+          let cur = goal;
+          while (cur !== undefined) {
+            path.push(cur);
+            cur = parent.get(cur);
+          }
+          return path.reverse();
+        }
+
+        for (const v of adjacency[u]) {
+          const isExcluded = (u === exA && v === exB) || (u === exB && v === exA);
+          if (isExcluded || visited.has(v)) continue;
+          visited.add(v);
+          parent.set(v, u);
+          queue.push(v);
+        }
+      }
+
+      return [];
+    }
+
+    function drawEdgesAndCycle(radius) {
+      clearGroup(edgeGroup);
+      clearGroup(cycleGroup);
+      if (radius <= 0 || normalizedPoints.length < 3) return;
+
+      const { edges, adjacency } = buildEdges(radius);
+      const cycle = findCycle(edges, adjacency);
+      const cyclePairs = new Set();
+
+      if (cycle.length >= 3) {
+        for (let i = 0; i < cycle.length; i++) {
+          const a = cycle[i];
+          const b = cycle[(i + 1) % cycle.length];
+          cyclePairs.add(edgeKey(a, b));
+        }
+      }
+
+      const maxGrayEdges = 800;
+      for (let k = 0; k < Math.min(edges.length, maxGrayEdges); k++) {
+        const [i, j] = edges[k];
+        if (cyclePairs.has(edgeKey(i, j))) continue;
+        edgeGroup.add(createLineBetween(normalizedPoints[i], normalizedPoints[j], 0x9ca3af, 0.22));
+      }
+
+      if (cycle.length >= 3) {
+        for (let i = 0; i < cycle.length; i++) {
+          const a = cycle[i];
+          const b = cycle[(i + 1) % cycle.length];
+          cycleGroup.add(createTubeBetween(normalizedPoints[a], normalizedPoints[b], 0xef4444, 0.018));
+        }
+      }
+    }
+
+    function edgeKey(a, b) {
+      return a < b ? `${a}-${b}` : `${b}-${a}`;
+    }
+
     function renderPointCloud() {
       clearGroup(pointGroup);
       clearGroup(sphereGroup);
+      clearGroup(edgeGroup);
+      clearGroup(cycleGroup);
 
       const radius = Number(els.radius.value);
       const pointColor = new THREE.Color(els.pointColor.value);
@@ -280,6 +436,8 @@
         sphere.position.set(p.x, p.y, p.z);
         sphereGroup.add(sphere);
       }
+
+      drawEdgesAndCycle(radius);
     }
 
     function resetCamera() {
@@ -295,9 +453,8 @@
         normalizedPoints = normalize(rawPoints);
         renderPointCloud();
         resetCamera();
-        setMessage(`${n}点のサンプル点群を生成しました。`);
       } catch (e) {
-        setMessage(e.message);
+        alert(e.message);
       }
     }
 
@@ -307,6 +464,9 @@
       console.assert(!document.getElementById("csvFile"), "CSV loading UI should not exist");
       console.assert(!document.getElementById("downloadCsv"), "CSV download button should not exist");
       console.assert(!document.getElementById("stats"), "Information panel should not exist");
+      const testEdges = [[0, 1], [1, 2], [2, 0]];
+      const testAdj = [[1, 2], [0, 2], [0, 1]];
+      console.assert(findCycle(testEdges, testAdj).length >= 3, "findCycle should detect a triangle cycle");
     }
 
     els.generateSample.addEventListener("click", generateAndDraw);
